@@ -11,21 +11,21 @@
  * return: int
  * - index if successful, -1 if max zones reached
  */
-int addZone(bool isSelected, int deviceId) {
+int addZone(int deviceId) {
   for (int i=0; i < MAX_ZONES; ++i) {
     if (climate.zones[i] == NULL) {
       Zone* zone = new Zone();
       zone->deviceId = deviceId;
       zone->id = i;
       zone->temperature = INITIALIZE_T_H;
+      zone->lastTemperature = INITIALIZE_T_H;
       zone->humidity = INITIALIZE_T_H;
+      zone->lastHumidity = INITIALIZE_T_H;
       zone->lastUpdated = millis();
       zone->isRapid = false;
-      strcpy(zone->locationName, "");
+      strcpy(zone->locationName, "<INIT>");
       climate.zones[i] = zone;
-      if (isSelected) {
-        selectZone(i);
-      }
+      Serial.println("New zone added");
       return i;
     }
   }
@@ -43,6 +43,7 @@ int addZone(bool isSelected, int deviceId) {
  */
 int removeZone(int id) {
   if (!isIdValid(id)) return -1;
+  Serial.println("Remove zone");
   delete climate.zones[id];
   return climate.zones[id] == NULL ? 1: 0;
 }
@@ -59,14 +60,16 @@ int removeZone(int id) {
  */
 void setZoneName(int deviceId, const char* newName) {
   for (int i=0; i < MAX_ZONES; ++i) {
-    if (climate.zones[i]->deviceId == deviceId) {
+    if (climate.zones[i] == NULL) {
+      continue;
+    } else if (climate.zones[i]->deviceId == deviceId) {
       int len = 0;
       while (newName[len] != NULL) {
         ++len;
       }
       if (len <= LCD_CHAR_LIMIT) {
+        Serial.println("Zone name updated");
         strcpy(climate.zones[i]->locationName, newName);
-        emitClimateStatus();
       }
     }
   }
@@ -76,21 +79,26 @@ void setZoneName(int deviceId, const char* newName) {
  * Update a zone's sensor values
  * <Sensor input>
  * 
- * params: int, float, float
- * id - id of zone to be updated
+ * params: int, float, float, bool
+ * id - index id of zone to be updated
  * temperature - current temperature
  * humidity - current humidity
+ * isSelected - true if zone should become selected
  * 
  * return: int
  * - 1 if valid, 0 if id is valid, but zone invalid, -1 if id is invalid
  */
-int updateZone(int id, float temperature, float humidity) {
+int updateZone(int id, float temperature, float humidity, bool isSelected) {
   if (!isIdValid(id)) return -1;
   Zone* zone = climate.zones[id];
   if (zone != NULL && isSensorValid(temperature, humidity)) {
     zone->temperature = temperature;
     zone->humidity = humidity;
     zone->lastUpdated = millis();
+    if (isSelected) {
+      selectZone(id);
+    }
+    queryEmitStatus(id);
     return 1;    
   }
   return 0;
@@ -109,10 +117,21 @@ int isZoneValid(int id) {
   if (!isIdValid(id)) return -1;
   Zone* zone = climate.zones[id];
   if (zone != NULL) {
-    if (isSensorValid(zone->temperature, zone->humidity)
-        && isSensorCurrent(zone->lastUpdated, zone->isRapid)) {
-          return 1;
-        }
+    bool isPlausible = isSensorValid(zone->temperature, zone->humidity);
+    bool isCurrent = isSensorCurrent(zone->lastUpdated, zone->isRapid);
+    if (isPlausible && isCurrent) return 1;
+    if (!isPlausible) {
+      Serial.println("Sensor values not valid:");
+      Serial.print("Temperature: ");
+      Serial.println(zone->temperature);
+      Serial.print("Humidity: ");
+      Serial.println(zone->humidity);
+    }
+    if (!isCurrent) {
+      Serial.print("Sensor value time limit exceeded: ");
+      int overBy = millis() - zone->lastUpdated + (zone->isRapid ? MAX_SINCE_LAST_RAPID_UPDATE: MAX_SINCE_LAST_UPDATE);
+      Serial.println(overBy / 1000);
+    }
   }
   return 0;
 }
@@ -141,11 +160,15 @@ bool isIdValid(int id) {
  */
 int selectZone(int id) {
   int validityCode = isZoneValid(id);
+  Serial.print("Select zone: ");
+  Serial.println(id);
+  Serial.print("Zone valid: ");
+  Serial.println(validityCode == 1 ? "True": "False");
   if (validityCode == 1) {
-    climate.zones[climate.selectedZoneIndex]->isRapid = false;
-    climate.selectedZoneIndex = id;
-    if (id) climate.isRapidSet = false;
-    climate.zones[climate.selectedZoneIndex]->isRapid = true;
+    climate.zones[climate.setZone]->isRapid = false;
+    climate.setZone = id;
+    climate.isRapidSet = id ? false: true;
+    climate.zones[climate.setZone]->isRapid = true;
   }
   return validityCode;
 }
@@ -178,5 +201,43 @@ int countZones() {
     if (climate.zones[i] != NULL) ++total;
   }
   return total;
+}
+
+/*
+ * Check if the difference between current temperature and last emitted 
+ * temperature are outside of the emit difference threshold. If so, 
+ * update last temperature or humidity and trigger a climate status emit
+ * 
+ * params: int
+ * id - zone index to check
+ * 
+ * return: none
+ */
+void queryEmitStatus(int id) {
+  Zone* zone = climate.zones[id];
+  if (abs(zone->temperature - zone->lastTemperature) > EMIT_DIFF_THRESHOLD
+      || abs(zone->humidity - zone->lastHumidity) > EMIT_DIFF_THRESHOLD) {
+    zone->lastTemperature = zone->temperature;
+    zone->lastHumidity = zone->humidity;
+    emitClimateStatus();
+  }
+}
+
+/*
+ * Get index of remote device by its ID
+ * 
+ * params: int
+ * deviceId - zone's unique device id
+ * 
+ * return: int
+ * - index of device if found, otherwise -1
+ */
+int getIndexByDevice(int deviceId) {
+  for (int i=0; i < MAX_ZONES; ++i) {
+    if (climate.zones[i] != NULL && climate.zones[i]->deviceId == deviceId) {
+      return i;
+    }
+  }
+  return -1;
 }
 
