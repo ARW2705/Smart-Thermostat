@@ -23,8 +23,8 @@ void listenForButton() {
       resetAnalogInput();
     }
   } else {
-    if (analog.analogIndex >= MIN_SAMPLE_SIZE) {
-      // button was released, handle the input if the minimum sample size is present
+    if (analog.analogIndex) {
+      // button was released, handle the input and reset sampling array
       handleAnalogInput(normalizeAnalogInputs());
     }
     resetAnalogInput();
@@ -88,16 +88,24 @@ void resetAnalogInput() {
  * return: none
  */
 void handleAnalogInput(int input) {
+  int tryCount = 0;
+  int searchIndex = climate.setZone;
   switch(input) {
     case 200:
       // black button pressed 3.51kohm
       // toggle display on/off
+      Serial.println("Black button");
       (screen.isDisplayOn) ? turnOffScreen(): turnOnScreen();
       break;
     case 400:
       // white button pressed 1.5kohm
-      // change lcd page
+      // change lcd page to next in sequence
+      // home -> mode -> zone -> sleep -> error
+      Serial.println("White button");
       switch(screen.currentPage) {
+        case 'h':
+          loadLCDPage('m');
+          break;
         case 'm':
           loadLCDPage('z');
           break;
@@ -108,60 +116,99 @@ void handleAnalogInput(int input) {
           loadLCDPage('e');
           break;
         case 'e':
-          loadLCDPage('m');
+          loadLCDPage('h');
           break;
         default:
-          loadLCDPage('m');
+          loadLCDPage('h');
           break;
       }
       break;
     case 600:
       // red button pressed 670ohm
       // increment values or toggle zone index
-      if (screen.currentPage == 'm' && climate.setTemperature < MAX_TEMP) {
-        request.temperature = climate.setTemperature + 1;
+      Serial.println("Red button");
+      // on home page - increment set temperature
+      if (screen.currentPage == 'h' && climate.setTemperature < MAX_TEMP) {
+        if (request.temperature == SENTINEL_TEMPERATURE) {
+          request.temperature = climate.setTemperature + 1;
+        } else if (request.temperature < MAX_TEMP) {
+          ++request.temperature;
+        }        
         request.isPending = true;
-        timer.request = millis();
+        loadLCDPage('h');
+      } 
+      // on mode page - cycle through mode options
+      else if (screen.currentPage == 'm') {
+        int index = 0;
+        for (int i=0; i < 4; ++i) {
+          if (climate.setMode == MODE_OPTIONS[i]) {
+            index = i;
+          }
+        }
+        index = index < 3 ? index + 1: 0;
+        request.mode = MODE_OPTIONS[index];
+        request.isPending = true;
         loadLCDPage('m');
-      } else if (screen.currentPage == 'z') {
-        int searchIndex = climate.selectedZoneIndex;
+      } 
+      // on zone page - cycle through available zones
+      else if (screen.currentPage == 'z') {
         do {
           if (searchIndex == MAX_ZONES - 1) {
             searchIndex = 0;
           } else {
             ++searchIndex;
           }
-        } while (!isZoneValid(searchIndex));
-        loadZonePage(searchIndex);
+        } while (tryCount < MAX_ZONES && isZoneValid(searchIndex) != 1);
+        screen.displayZone = searchIndex;
+        loadZonePage();
       } else if (screen.currentPage == 'o') {
         request.setSleep = false;
         request.isPending = true;
-        timer.request = millis();
         loadLCDPage('o');
       }
       break;
     case 800:
       // blue button pressed 270ohm
-      // increment values or toggle zone index
-      if (screen.currentPage == 'm' && climate.setTemperature > MIN_TEMP) {
-        request.temperature = climate.setTemperature - 1;
+      // decrement values or toggle zone index
+      Serial.println("Blue button");
+      // on home page - decrement set temperature
+      if (screen.currentPage == 'h' && climate.setTemperature > MIN_TEMP) {
+        if (request.temperature == SENTINEL_TEMPERATURE) {
+          request.temperature = climate.setTemperature - 1;
+        } else if (request.temperature > MIN_TEMP) {
+          --request.temperature;
+        }
         request.isPending = true;
-        timer.request = millis();
+        loadLCDPage('h');
+      } 
+      // on mode page - cycle through mode options
+      else if (screen.currentPage == 'm') {
+        int index = 0;
+        for (int i=0; i < 4; ++i) {
+          if (climate.setMode == MODE_OPTIONS[i]) {
+            index = i;
+          }
+        }
+        index = index ? index - 1: 3;
+        request.mode = MODE_OPTIONS[index];
+        request.isPending = true;
         loadLCDPage('m');
-      } else if (screen.currentPage == 'z') {
-        int searchIndex = climate.selectedZoneIndex;
+      } 
+      // on zone page - cycle through available zones
+      else if (screen.currentPage == 'z') {
         do {
           if (searchIndex == 0) {
             searchIndex = MAX_ZONES - 1;
           } else {
             --searchIndex;
           }
-        } while (!isZoneValid(searchIndex));
-        loadZonePage(searchIndex);
+          ++tryCount;
+        } while (tryCount < MAX_ZONES && isZoneValid(searchIndex) != 1);
+        screen.displayZone = searchIndex;
+        loadZonePage();
       } else if (screen.currentPage == 'o') {
         request.setSleep = true;
         request.isPending = true;
-        timer.request = millis();
         loadLCDPage('o');
       }
       break;
