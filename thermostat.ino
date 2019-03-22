@@ -31,24 +31,31 @@
 const int CLOCK_SYNC_INTERVAL = 24 * 60 * 60 * 1000; // Sync clock to internet time every 24 hours
 const int COOLDOWN_INTERVAL = 2 * 60 * 1000; // Cool down time interval after HVAC cycle has completed or Mode has been changed
 const int IO_INTERVAL = 5 * 1000; // Sample local temperature sensor every 5 seconds
-const int REQUEST_INTERVAL = 2 * 1000; // Delay between values being input to operating values being updated
-const int LCD_CYCLE_INTERVAL = 5 * 1000; // Refresh lcd to reflect changed values - user made changes will not wait for cycle
+const int REQUEST_INTERVAL = 3 * 1000; // Delay between values being input to operating values being updated
+const int LCD_CYCLE_INTERVAL = 2 * 1000; // Refresh lcd to reflect changed values - user made changes will not wait for cycle
 const int LCD_TIMEOUT_INTERVAL = 30 * 1000; // Turn off lcd 30 seconds after last request application
 const int PROGRAM_RUN_INTERVAL = 10 * 1000; // Delay between pre-program and thermostat cycle updates
 const int DEFAULT_TIMESTAMP = 5 * 60 * 1000; // Time interval between monitored zone checks
 const int RUN_ON_INTERVAL = 30 * 1000; // Fan run on interval after heat/ac cycle has finished
 const int EMIT_COOLDOWN = 500; // Force half second delay between emits to prevent repeated emit events of the same data
+const int HEARTBEAT_INTERVAL = 15 * 1000; // Websocket keep-alive message interval
+const int MONITOR_INTERVAL = 60 * 1000;
+const int RECONNECT_INTERVAL = 5 * 1000;
+const int LOGIN_RECONNECT_INTERVAL = 60 * 1000;
 
 // system limit constants
 const float MIN_TEMP = 60; // Minimum set temperature in degrees Fahrenheit
 const float MAX_TEMP = 80; // Maximum set temperature in degrees Fahrenheit
 const int SAMPLE_SIZE = 10; // Number of inputs to read from the analog input for local interface push buttons
-const int MIN_SAMPLE_SIZE = 3;
+const int MIN_SAMPLE_SIZE = 2;
 const int MAX_ZONES = 10; // Max number of zones allowed
 const int TEMPERATURE_THRESHOLD = 2; // Threshold outside of which an HVAC cycle will start e.g. set temp 70, mode cool, cycle won't start until actual temp is 72
 const float TEMPERATURE_UPDATE_THRESHOLD = 0.5; // Threshold outside of which a new websocket message will be sent
+const int EMIT_DIFF_THRESHOLD = 1; // difference threshold between last emitted zone value and current 
+const int MAX_RETRY = 20;
 
-const int INITIALIZE_T_H = -99;
+// temperature and humidity sensor constants
+const int INITIALIZE_T_H = -99; // Value to initialize temperature and humidity variables
 
 // program constants
 const int PROGRAM_LENGTH = 112; // Data points for a complete program
@@ -64,7 +71,7 @@ const char SENTINEL_MODE = '\0';
 const int SENTINEL_ZONE = -1;
 
 // sensor constants
-const int ONE_WIRE_BUS = 0; // DS18B20 bus
+const int ONE_WIRE_BUS = 0; // GPIO 0 NodeMCU pin D3 - DS18B20 bus
 const int TEMPERATURE_PRECISION = 9; // DS18B20 temperature sensor resolution
 DeviceAddress LOCAL_SENSOR = {0x28, 0xFF, 0x05, 0x47, 0x21, 0x17, 0x04, 0x20}; // Memory address of DS18B20 sensor
 const int SENSOR_MAX = 130; // Sanity check value to prevent abnormal values from being used
@@ -137,6 +144,7 @@ struct Credentials {
 };
 
 struct Error {
+  bool hasError = false; // true if an error has been set
   char errorName[LCD_CHAR_LIMIT]; // error type
   char errorDetail[LCD_CHAR_LIMIT]; // error detail message
 };
@@ -147,7 +155,7 @@ struct Program {
   char name[PROGRAM_CHAR_LIMIT + 1]; // text name of program - max 10 characters
   char mode; // either COOL or HEAT in a program
   int schedule[PROGRAM_LENGTH]; // array with the following order: 4 ints per time period [hour, minute, temperature, zone], 4 time periods per day, 7 days in schedule
-  char id[25]; // query id for stored program
+  char queryId[25]; // query id for stored program
 };
 
 struct Request {
@@ -190,11 +198,18 @@ struct Timeout {
   uint64_t timeSync; // sync internal time to server time once per 24 hours
   uint64_t checkDefault; // periodically check if monitored zone is still valid - run default cycle if not - return to monitored zone if it becomes available again
   uint64_t runOn; // fan run on countdown after heat/ac cycle has completed
+  uint64_t monitor;
+  uint64_t reconnect;
+  uint64_t retryConnection;
 };
 
-struct WebsocketUtil {
-  int isConnected = 0; // connection to websocket server
+struct ConnectionUtility {
+  bool isInit = true;
   std::queue<struct Task> emitQueue; // queue of pending websocket emits
+  int maxQueue = 20;
+  bool isWifiConnected = false;
+  bool isLoggedIn = false;
+  bool isSocketConnected = false;
 };
 
 struct Zone {
@@ -202,7 +217,9 @@ struct Zone {
   int deviceId; // unique id for each zone - to be used for user id
   int id; // internal id for each zone - to be used for system addressing
   float temperature; // in 0.01 of a degree
+  float lastTemperature; // last temperature that triggered an emit
   float humidity; // in 0.01 of a %
+  float lastHumidity; // last humidity that triggered an emit
   uint64_t lastUpdated; // check if monitored sensor has sent a timely update respecting its set transmission rate
   bool isRapid; // true if sensor has been set for rapid tranmission, false if set for long tranmission
 };
@@ -217,9 +234,8 @@ struct Climate {
   char setMode = 'O'; // current desired mode
   char status[8] = "OFF"; // current thermostat operating status, either "RUNNING" OR "OFF"
   int setTemperature = 70; // current desired temperature in degrees
-  int selectedZoneIndex = 0;
-  int lastSelectedZoneIndex = 0;
-  Zone* zones[MAX_ZONES];
+  int setZone = 0; // index of selected zone to monitor
+  Zone* zones[MAX_ZONES]; // array of pointers to zone structs
 };
 
 /* END STRUCTURE DEFINITIONS */
@@ -238,18 +254,15 @@ Climate climate; // primary climate status and operation data
 Timeout timer; // various timer timestamps
 Request request; // updated user inputs pending application
 Program program; // a pre-programmed thermostat operating schedule
-Screen screen;
-Error error;
-WebsocketUtil socketUtil;
-Analog analog;
+Screen screen; // lcd operation data
+Error error; // error message struct
+ConnectionUtility connectUtil; // websocket utility 
+Analog analog; // analog input utilities
 
 /* END OBJECT/STRUCTURE INITIALIZATIONS */
 
 
 /*========== Function Declarations ==========*/
-// thermostat tab
-
-
 // http tab
 void login();
 void syncTime();
@@ -267,8 +280,10 @@ void turnOffScreen();
 void turnOnScreen();
 void loadLCDPage(char);
 void loadMainPage();
+void loadModePage();
 void loadZonePage(int);
 void loadErrorPage();
+void printConnectNotification(char);
 void printToLCD(const char*, const char*);
 
 // message_text tab
@@ -284,6 +299,7 @@ int getStringLength(int);
 void runThermostatCycle();
 void setCycle(bool);
 void runOn(bool);
+void setAllCyclesOff();
 
 // program tab
 void usePreprogrammedValues();
@@ -297,13 +313,16 @@ void processPendingRequests();
 void resetRequest();
 
 // sensor tab
+void checkLocalSensor();
 bool isSensorValid(float, float);
 bool isSensorCurrent(uint64_t, bool);
 
 // system
+void connectWifi();
 bool isClimateControlLoaded();
 void initClimateControl();
 void initDefaultZone();
+void printStatus();
 
 // time tab
 float getComparisonTime();
@@ -321,17 +340,20 @@ void emitProgramUpdateConfirmation(bool);
 bool isEmitCooldownExpired();
 void processQueuedEmits();
 bool isEmitQueueEmpty();
+void emitHeartbeat();
 
 // zone tab
 int addZone(bool, int);
 int removeZone(int);
 void setZoneName(int, const char*);
-int updateZone(int, float, float);
+int updateZone(int, float, float, bool);
 int isZoneValid(int);
 bool isIdValid(int);
 void runDefault();
 int selectZone(int);
 int countZones();
+void queryEmitStatus(int);
+int getIndexByDevice(int);
 
 
 /* END FUNCTION DEFINITIONS */
@@ -358,32 +380,20 @@ void setup() {
   digitalWrite(AC_RELAY, HIGH);
   digitalWrite(HEAT_RELAY, HIGH);
 
+  // alive status led blink
+  pinMode(LED_BUILTIN, OUTPUT);
+  digitalWrite(LED_BUILTIN, HIGH);
+
   // initialize lcd
   lcd.begin(16, 2);
   lcd.home();
-  lcd.print("System Loading");
+  lcd.print(" System Loading ");
   screen.isDisplayOn = true;
   delay(10);
 
   // connect to wifi
+  WiFi.setSleepMode(WIFI_NONE_SLEEP);
   wifiMulti.addAP(ROUTER_SSID, ROUTER_PASSWORD);
-  Serial.print("Connecting to ");
-  Serial.print(ROUTER_SSID);
-  Serial.println(" ...\n");
-  int i = 0;
-  while (wifiMulti.run() != WL_CONNECTED) {
-    delay(1000);
-    Serial.print(++i);
-    Serial.print(' ');
-  }
-  Serial.print("\n\n");
-  Serial.println("Connection established!");
-  Serial.print("Connected to: ");
-  Serial.println(WiFi.SSID());
-  Serial.print("IP address: ");
-  Serial.println(WiFi.localIP());
-  Serial.println();
-  delay(10);
 
   // define remote dht sensor handler and start webserver
   server.on("/sensor/update", HTTP_POST, handleSensorPostRequest);
@@ -391,12 +401,10 @@ void setup() {
   server.begin();
   Serial.println("HTTP server started\n");
 
-  // log into server and store credentials
-  login();
-
   // define websocket handler
   io.beginSocketIO(SERVER_ADDRESS, WEBSOCKET_PORT);
   io.onEvent(ioEvent);
+  io.setReconnectInterval(RECONNECT_INTERVAL);
 
   // begin monitoring local temperature sensor
   localSensor.begin();
@@ -407,11 +415,6 @@ void setup() {
   while(!isClimateControlLoaded()) {
     delay(100);
   }
-
-  // show loading complete on lcd
-  lcd.clear();
-  lcd.home();
-  lcd.print("Loading Complete");
 
   // initialize timers
   uint64_t start = millis();
@@ -427,11 +430,47 @@ void setup() {
   timer.socketEmit = start;
   timer.checkDefault = start;
   timer.runOn = 0;
-  Serial.println("Setup complete");
+  timer.heartbeat = start;
+  timer.monitor = start;
+  timer.retryConnection = start;
+
+  connectWifi();
+  if (connectUtil.isWifiConnected) login();
+  if (connectUtil.isLoggedIn) syncTime();
+
+  // show loading complete on lcd
+  char line1[LCD_CHAR_LIMIT] = "";
+  char line2[LCD_CHAR_LIMIT] = "";
+  if (!connectUtil.isWifiConnected) {
+    timer.retryConnection = millis();
+    Serial.println("No Wifi connection");
+    strcat(line1, " WiFi not found ");
+    strcat(line2, LCD_BLANK_LINE);
+  } else if (!connectUtil.isLoggedIn) {
+    Serial.println("Could not log in");
+    strcat(line1, "Could not log in");
+    strcat(line2, LCD_BLANK_LINE);
+  } else {
+    Serial.println("Setup complete");
+    strcat(line1, " Setup complete ");
+    strcat(line2, LCD_BLANK_LINE);
+  }
+  printToLCD(line1, line2);
+
   delay(100);
 } // end setup
 
 void loop() {
+
+  // attempt WiFi and server reconnect if disconnected
+  if (!connectUtil.isWifiConnected && millis() - timer.retryConnection > RECONNECT_INTERVAL) {
+    connectWifi(); 
+    timer.retryConnection = millis(); 
+  } else if (!connectUtil.isLoggedIn && millis() - timer.retryConnection > LOGIN_RECONNECT_INTERVAL) {
+    login();
+    timer.retryConnection = millis(); 
+  } 
+  
   // handle pending websocket emits
   processQueuedEmits();
   delay(10);
@@ -439,7 +478,7 @@ void loop() {
   // websocket listener
   io.loop();
   delay(10);
-
+  
   // http server listener
   server.handleClient();
   delay(10);
@@ -447,6 +486,14 @@ void loop() {
   // listen for local user input
   listenForButton();
   delay(10);
+
+  // websocket heartbeat
+  if (millis() - timer.heartbeat > HEARTBEAT_INTERVAL) {
+    digitalWrite(LED_BUILTIN, LOW);
+    emitHeartbeat();
+    timer.heartbeat = millis();
+    digitalWrite(LED_BUILTIN, HIGH);
+  }
 
   // check local sensor
   if (millis() - timer.sensor > IO_INTERVAL) {
@@ -467,7 +514,7 @@ void loop() {
   }
 
   // refresh lcd
-  if (millis() - timer.lcdRefresh > LCD_CYCLE_INTERVAL) {
+  if (screen.isDisplayOn && millis() - timer.lcdRefresh > LCD_CYCLE_INTERVAL) {
     // turn screen off if timed out
     if (screen.isDisplayOn && millis() - timer.lcdTimeout > LCD_TIMEOUT_INTERVAL) {
       turnOffScreen();
@@ -484,6 +531,7 @@ void loop() {
 
   // sync internal time with internet
   if (millis() - timer.timeSync > CLOCK_SYNC_INTERVAL) {
+    Serial.println("Sync internal clock");
     climate.isTimeSet = false;
     syncTime();
     if (climate.isTimeSet) {
@@ -492,4 +540,13 @@ void loop() {
       timer.timeSync = millis() - CLOCK_SYNC_INTERVAL + 5000;
     }
   }
+
+  // print system status
+  if (DEBUG && millis() - timer.monitor > MONITOR_INTERVAL) {
+    Serial.println("DEBUG print status");
+    printStatus();
+    timer.monitor = millis();
+  }
+
+  delay(100);
 }
