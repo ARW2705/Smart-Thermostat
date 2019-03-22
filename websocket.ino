@@ -12,17 +12,21 @@
 void ioEvent(WStype_t type, uint8_t* payload, size_t length) {
   switch(type) {
     case WStype_DISCONNECTED:
-      Serial.print("[ws] Disconnected!\n\n");
-      socketUtil.isConnected = 0;
+      if (connectUtil.isSocketConnected) {
+        Serial.print("\n[ws] Disconnected!\n\n");
+        connectUtil.isSocketConnected = false;
+      }
       break;
     case WStype_CONNECTED:
-      Serial.printf("[ws] Connected to url %s\n\n", payload);
-      socketUtil.isConnected = 1;
+      Serial.printf("\n[ws] Connected to url %s\n\n", payload);
+      if (!connectUtil.isSocketConnected) printConnectNotification('s');
+      connectUtil.isSocketConnected = true;
       io.sendTXT("5");
       break;
     case WStype_TEXT:
       {
-        Serial.print("[ws] Incoming message\n\n");
+        Serial.print("\n[ws] Incoming message\n\n");
+        connectUtil.isSocketConnected = true;
         char* charPayload = (char*) payload;
         if (*charPayload == '3' || (!strcmp(charPayload, "40"))) break;
 
@@ -54,33 +58,41 @@ void ioEvent(WStype_t type, uint8_t* payload, size_t length) {
         } else {
           if (!strcmp(socketMessage, "proxy-request-ping-thermostat")) {
             // send alive status
+            Serial.println("proxy-request-ping-thermostat");
             echoPing();
-            
+            /*----------------------------------------------------------*/
           } else if (!strcmp(socketMessage, "proxy-request-get-climate-data")) {
             // generate climate data
+            Serial.println("proxy-request-get-climate-data");
             emitClimateStatus();
-
-          } else if (!strcmp(socketMessage, "proxy-request-get-program-id")) {
+            /*----------------------------------------------------------*/
+          } else if (!strcmp(socketMessage, "proxy-request-get-thermostat-program-id")) {
             // generate program data
+            Serial.println("proxy-request-get-thermostat-program-id");
             emitProgramId();
-            
+            /*----------------------------------------------------------*/
           } else if (!strcmp(socketMessage, "proxy-request-update-climate-settings")) {
             // set climate settings to user specifications
+            Serial.println("proxy-request-update-climate-settings");
             updateClimateSettings(root);
-            
+            /*----------------------------------------------------------*/
           } else if (!strcmp(socketMessage, "proxy-request-update-program")) {
             // load a new program, activate if isActive is true
+            Serial.println("proxy-request-update-program");
             updateProgram(root);
-            
+            /*----------------------------------------------------------*/
           } else if (!strcmp(socketMessage, "proxy-request-toggle-program")) {
+            // turn program on/off
+            Serial.println("proxy-request-toggle-program");
             toggleProgram(root["isActive"]);
-            
+            /*----------------------------------------------------------*/
           } else if (!strcmp(socketMessage, "proxy-request-update-zone-name")) {
             // update zone name
+            Serial.println("proxy-request-update-zone-name");
             int setId = root["deviceId"];
             const char* setName = root["name"];
             setZoneName(setId, setName);
-            
+            /*----------------------------------------------------------*/
           } else {
             Serial.print("Socket message ");
             Serial.print(socketMessage);
@@ -92,11 +104,11 @@ void ioEvent(WStype_t type, uint8_t* payload, size_t length) {
       }
       break;
     case WStype_BIN:
-      Serial.printf("[ws] Get binary length: %u\n\n", length);
+      Serial.printf("\n[ws] Get binary length: %u\n\n", length);
       hexdump(payload, length);
       break;
     case WStype_ERROR:
-      Serial.printf("[ws] Error: %s\n\n", payload);
+      Serial.printf("\n[ws] Error: %s\n\n", payload);
       break;
   }
 } // end ioEvent
@@ -109,13 +121,15 @@ void ioEvent(WStype_t type, uint8_t* payload, size_t length) {
  * return: none
  */
 void echoPing() {
-  if (isEmitCooldownExpired()) {
+  if (connectUtil.isSocketConnected && isEmitCooldownExpired()) {
+    Serial.println("response-ping-thermostat");
     io.sendTXT("42[\"response-ping-thermostat\": {}]");
     timer.socketEmit = millis();
-  } else {
+  } else if (connectUtil.emitQueue.front().id != 0) {
+    Serial.println("Queuing: response-ping-thermostat");
     Task t;
     t.id = 0;
-    socketUtil.emitQueue.push(t);
+    connectUtil.emitQueue.push(t);
   }
 }
 
@@ -127,17 +141,19 @@ void echoPing() {
  * return: none
  */
 void emitProgramId() {
-  if (isEmitCooldownExpired()) {
-    char message[72];
-    strcpy(message, "42[\"response-get-program-id\": {\"id\": \"");
-    strcat(message, program.id);
+  if (connectUtil.isSocketConnected && isEmitCooldownExpired()) {
+    Serial.println("response-get-thermostat-program-id");
+    char message[100];
+    strcpy(message, "42[\"response-get-thermostat-program-id\": {\"queryId\": \"");
+    strcat(message, program.queryId);
     strcat(message, "\"}]");
     io.sendTXT(message);
     timer.socketEmit = millis();
-  } else {
+  } else if (connectUtil.emitQueue.front().id != 1) {
+    Serial.println("Queuing: response-get-thermostat-program-id");
     Task t;
     t.id = 1;
-    socketUtil.emitQueue.push(t);
+    connectUtil.emitQueue.push(t);
   }
 }
 
@@ -151,18 +167,22 @@ void emitProgramId() {
  * return: none
  */
 void emitError(const char* errorName, const char* errorMessage) {
-  if (isEmitCooldownExpired()) {
-    char* message = (char*) malloc(sizeof(char) * 200);
-    composeErrorMessage(errorName, errorMessage, message);
-    io.sendTXT(message);
-    free(message);
-    timer.socketEmit = millis();
-  } else {
-    Task t;
-    t.errorName = errorName;
-    t.errorMessage = errorMessage;
-    t.id = 2;
-    socketUtil.emitQueue.push(t);
+  if (connectUtil.isSocketConnected) {
+    if (isEmitCooldownExpired()) {
+      Serial.println("request-post-error");
+      char* message = (char*) malloc(sizeof(char) * 200);
+      composeErrorMessage(errorName, errorMessage, message);
+      io.sendTXT(message);
+      free(message);
+      timer.socketEmit = millis();
+    } else if (connectUtil.emitQueue.front().id != 2) {
+      Serial.println("Queuing: request-post-error");
+      Task t;
+      t.errorName = errorName;
+      t.errorMessage = errorMessage;
+      t.id = 2;
+      connectUtil.emitQueue.push(t);
+    }
   }
 }
 
@@ -174,17 +194,19 @@ void emitError(const char* errorName, const char* errorMessage) {
  * return: none
  */
 void emitClimateStatus() {
-  if (isEmitCooldownExpired()) {
+  if (connectUtil.isSocketConnected && isEmitCooldownExpired()) {
+    Serial.println("request-post-climate-data");
     int zones = countZones();
-    char* message = (char*) malloc(sizeof(char) * (100 * zones + 100));
+    char* message = (char*) malloc(sizeof(char) * (100 * zones + 200));
     composeClimateStatusMessage(message);
     io.sendTXT(message);
     free(message);
     timer.socketEmit = millis();
-  } else {
+  } else if (connectUtil.emitQueue.front().id != 3) {
+    Serial.println("Queuing: request-post-climate-data");
     Task t;
     t.id = 3;
-    socketUtil.emitQueue.push(t);
+    connectUtil.emitQueue.push(t);
   }
 }
 
@@ -197,35 +219,58 @@ void emitClimateStatus() {
  * return: none
  */
 void emitProgramUpdateConfirmation(bool fullUpdate) {
-  if (isEmitCooldownExpired()) {
+  if (connectUtil.isSocketConnected && isEmitCooldownExpired()) {
     if (fullUpdate) {
-      char* message = (char*) malloc(sizeof(char) * (100));
+      Serial.println("reponse-update-program");
+      char* message = (char*) malloc(sizeof(char) * (800));
       composeProgramDataMessage(message);
       io.sendTXT(message);
       free(message);
     } else {
-      char message[50];
-      strcpy(message, "42[\"response-update-program\": {\"isActive\": ");
+      Serial.println("response-toggle-program");
+      char message[100];
+      strcpy(message, "42[\"response-toggle-program\": {\"isActive\": ");
       strcat(message, program.isActive ? "true": "false");
-      strcat(message, "}]");
+      strcat(message, "}, \"queryId\": \"");
+      strcat(message, program.queryId);
+      strcat(message, "\"}]");
       io.sendTXT(message);
     }
     timer.socketEmit = millis();
-  } else {
+  } else if (connectUtil.emitQueue.front().id != 4) {
+    Serial.println("Queuing: response-update-program or response-toggle-program");
     Task t;
     t.fullUpdate = fullUpdate;
     t.id = 4;
-    socketUtil.emitQueue.push(t);
+    connectUtil.emitQueue.push(t);
   }
 }
 
+/*
+ * Check if websocket emit cooldown has expired
+ * Without a cooldown, websocket ends up firing 
+ * mulitple times for the same message
+ * 
+ * params: none
+ * 
+ * return: bool
+ * - true if emit cooldown has expired
+ */
 bool isEmitCooldownExpired() {
   return millis() - timer.socketEmit > EMIT_COOLDOWN;
 }
 
+/*
+ * Get the next queued emit and call the appropriate function
+ * 
+ * params: none
+ * 
+ * return: none
+ */
 void processQueuedEmits() {
-  if (!isEmitQueueEmpty && isEmitCooldownExpired()) {
-    Task nextTask = socketUtil.emitQueue.front();
+  if (connectUtil.isSocketConnected && !isEmitQueueEmpty() && isEmitCooldownExpired()) {
+    Serial.println("Emitting from queue");
+    Task nextTask = connectUtil.emitQueue.front();
     switch(nextTask.id) {
       case 0:
         echoPing();
@@ -250,12 +295,33 @@ void processQueuedEmits() {
         emitError("InternalError", error);
         break;
     }
-    socketUtil.emitQueue.pop();
+    connectUtil.emitQueue.pop();
     timer.socketEmit = millis();
   }
 }
 
+/*
+ * Helper function to check if socket emit queue is empty
+ * 
+ * params: none
+ * 
+ * return: bool
+ * - true if queue is empty
+ */
 bool isEmitQueueEmpty() {
-  return socketUtil.emitQueue.empty();
+  return connectUtil.emitQueue.empty();
+}
+
+/*
+ * Emit heartbeat to keep webocket connection open
+ * 
+ * params: none
+ * 
+ * return: none
+ */
+void emitHeartbeat() {
+  if (connectUtil.isSocketConnected) {
+    io.sendTXT("2");
+  }
 }
 
