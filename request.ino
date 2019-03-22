@@ -12,14 +12,25 @@
  */
 void updateClimateSettings(JsonObject& root) {
   // get values from root
-  const char* setMode = root["mode"];
-  int setZone = root["zone"];
-  int setTemperature = root["targetTemperature"];
+  const char* setMode = root["setMode"];
+  int setZone = root["setZone"];
+  int setTemperature = root["setTemperature"];
   bool sleep = root["sleep"];
+
+  Serial.println("New climate update");
+  Serial.print("Mode: ");
+  Serial.println(charifyMode(setMode));
+  Serial.print("Zone: ");
+  Serial.println(setZone);
+  Serial.print("Temperature: ");
+  Serial.println(setTemperature);
+  Serial.print("Sleep: ");
+  Serial.println(sleep ? "True": "False");
+  Serial.println();
 
   // set errors or default true
   bool zoneError = !isIdValid(setZone);
-  bool temperatureError = setTemperature <= MAX_TEMP && setTemperature >= MIN_TEMP;
+  bool temperatureError = setTemperature > MAX_TEMP && setTemperature < MIN_TEMP;
   bool modeError = charifyMode(setMode) == CHAR_SENTINEL;
 
   // check errors
@@ -78,7 +89,11 @@ void updateProgram(JsonObject& root) {
       program.schedule[i] = root["program"][i];
     }
 
+    const char* objectId = root["queryId"];
+    strcpy(program.queryId, objectId);
+
     program.isLoaded = true;
+    Serial.println("New operating settings");
     emitProgramUpdateConfirmation(true);
   }
 }
@@ -104,7 +119,8 @@ void toggleProgram(bool isActive) {
  * return: none
  */
 void processPendingRequests() {
-  climate.isActive = request.setSleep;
+  Serial.println("Process pending requests");
+  climate.isActive = !request.setSleep;
   program.isActive = false;
   if (request.temperature != SENTINEL_TEMPERATURE) {
     climate.setTemperature = request.temperature;
@@ -113,7 +129,7 @@ void processPendingRequests() {
     climate.setMode = request.mode;
   }
   if (request.zone != SENTINEL_ZONE && isZoneValid(request.zone) == 1) {
-    climate.selectedZoneIndex = request.zone;
+    climate.setZone = request.zone;
   }
   resetRequest();
 }
