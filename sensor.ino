@@ -15,8 +15,12 @@ void checkLocalSensor() {
   float tempC = localSensor.getTempC(LOCAL_SENSOR);
   float tempF = DallasTemperature::toFahrenheit(tempC);
   if (isSensorValid(tempF, 0)) {
-    updateZone(0, tempF, 0);
-  } 
+    bool runDefault = climate.setZone == 0 && !climate.isRapidSet;
+    updateZone(0, tempF, 0, runDefault);
+    queryEmitStatus(0);
+  } else {
+    Serial.println("Invalid temperature sensor value");
+  }
 }
 
 /*
