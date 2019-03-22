@@ -12,10 +12,11 @@
 void usePreprogrammedValues() {
   if (climate.isTimeSet) {
     if (program.isLoaded && program.isActive) {
+      Serial.println("Updating climate control values on schedule");
       int programIndex = getProgramIndex();
       climate.setMode = program.mode;
       climate.setTemperature = program.schedule[programIndex + 2];
-      climate.selectedZoneIndex = program.schedule[programIndex + 3];
+      climate.setZone = getIndexByDevice(program.schedule[programIndex + 3]);
     } 
   } else {
     // TODO emit time error message
@@ -51,6 +52,8 @@ int getProgramIndex() {
       scheduled = (day * 16) + (i * 4);
     }
   }
+  Serial.print("Time break index: ");
+  Serial.println(scheduled);
   return scheduled;
 }
 
@@ -100,12 +103,15 @@ bool isProgramValid(JsonObject& root) {
   }
 
   if (nameError) {
+    Serial.println("ProgramError: Invalid name update");
     emitError("ProgramError", "Invalid name update");  
   }
   if (modeError) {
+    Serial.println("ProgramError: Invalid mode update");
     emitError("ProgramError", "Invalid mode update");
   }
   if (scheduleError) {
+    Serial.println("ProgramError: Invalid program schedule values found");
     emitError("ProgramError", "Invalid program schedule values found");
   }
 
