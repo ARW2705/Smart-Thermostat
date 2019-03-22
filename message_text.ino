@@ -19,6 +19,8 @@ void composeLoginMessage(char* loginValues) {
   strcat(loginValues, "\", \"password\":\"");
   strcat(loginValues, PASSWORD);
   strcat(loginValues, "\"}");
+  Serial.println("LOGIN: ");
+  Serial.println(loginValues);
   delay(10);
 } // end composeLoginMessage
 
@@ -31,6 +33,7 @@ void composeLoginMessage(char* loginValues) {
  * return: none
  * 
  * example:
+ * 
  * 42["request-post-climate-data",{
  *   "setTemperature": 70,
  *   "status": "RUNNING",
@@ -64,7 +67,7 @@ void composeClimateStatusMessage(char* message) {
   strcat(message, _setTemperature);
   strcat(message, ",");
 
-  strcat(message, "\"status\": \"");
+  strcat(message, "\"operatingStatus\": \"");
   strcat(message, climate.status);
   strcat(message, "\",");
 
@@ -75,23 +78,24 @@ void composeClimateStatusMessage(char* message) {
   strcat(message, "\",");
 
   char _zone[2];
-  sprintf(_zone, "%d", climate.selectedZoneIndex);
+  sprintf(_zone, "%d", climate.setZone);
   strcat(message, "\"setZone\": ");
   strcat(message, _zone);
   strcat(message, ",");
 
-  strcat(message, "\"units\": \"");
-  strcat(message, climate.isF ? "F": "C");
-  strcat(message, "\",");
+  strcat(message, "\"sleep\": ");
+  strcat(message, climate.isActive ? "true": "false");
+  strcat(message, ",");
 
-  strcat(message, "\"zones\": [");
+  strcat(message, "\"zoneData\": [");
   for (int i=0; i < MAX_ZONES; ++i) {
     if (climate.zones[i] != NULL) {
+      if (i) strcat(message, ",");
       strcat(message, "{\"locationName\": \"");
       strcat(message, climate.zones[i]->locationName);
       strcat(message, "\",");
 
-      char _deviceId[4];
+      char _deviceId[5];
       sprintf(_deviceId, "%d", climate.zones[i]->deviceId);
       strcat(message, "\"deviceId\": ");
       strcat(message, _deviceId);
@@ -99,7 +103,7 @@ void composeClimateStatusMessage(char* message) {
 
       char _zone[2];
       sprintf(_zone, "%d", i);
-      strcat(message, "\"zone\": ");
+      strcat(message, "\"id\": ");
       strcat(message, _zone);
       strcat(message, ",");
 
@@ -117,6 +121,9 @@ void composeClimateStatusMessage(char* message) {
     }
   }
   strcat(message, "]}]");
+  Serial.println("CLIMATE UPDATE: ");
+  Serial.println(message);
+  delay(10);
 }
 
 /*
@@ -128,6 +135,7 @@ void composeClimateStatusMessage(char* message) {
  * return: none
  * 
  * example:
+ * 
  * 42["response-update-program",{
  *   "isActive": false,
  *   "isLoaded": true,
@@ -151,18 +159,21 @@ void composeProgramDataMessage(char* message) {
   char strMode[5];
   stringifyMode(program.mode, strMode);
   strcat(message, strMode);
-  strcat(message, "\", \"id\": \"");
-  strcat(message, program.id);
+  strcat(message, "\", \"queryId\": \"");
+  strcat(message, program.queryId);
   strcat(message, "\", \"program\": [");
   for (int i=0; i < PROGRAM_LENGTH - 1; ++i) {
     char strNum[4];
     sprintf(strNum, "%d,", program.schedule[i]);
     strcat(message, strNum);
   }
-  char strNum[3];
+  char strNum[5];
   sprintf(strNum, "%d", program.schedule[PROGRAM_LENGTH - 1]);
   strcat(message, strNum);
   strcat(message, "]}]");
+  Serial.println("PROGRAM UPDATE: ");
+  Serial.println(message);
+  delay(10);
 }
 
 /*
@@ -176,6 +187,7 @@ void composeProgramDataMessage(char* message) {
  * return: none
  * 
  * example:
+ * 
  * 42["request-post-error",{
  *   "error": "RequestError",
  *   "message": "Invalid mode: 'E'"
@@ -188,6 +200,8 @@ void composeErrorMessage(const char* errorName, const char* errorMessage, char* 
   strcat(message, "\",\"message\": \"");
   strcat(message, errorMessage);
   strcat(message, "\"}]");
+  Serial.println("ERROR: ");
+  Serial.println(message);
 }
 
 /*
@@ -219,6 +233,15 @@ void stringifyMode(char mode, char* formatted) {
   }
 }
 
+/*
+ * Convert mode string to its char value (first letter)
+ * 
+ * params: const char*
+ * inputMode - mode string
+ * 
+ * return: char
+ * - first letter of mode capitalized or 'E' if inputMode is invalid
+ */
 char charifyMode(const char* inputMode) {
   for (int i=0; i < 4; ++i) {
     if (*inputMode == MODE_OPTIONS[i]) return *inputMode;
@@ -238,7 +261,13 @@ void stringifyProgOnOff(char programOn, char* formatted) {
 }
 
 /*
+ * Get the number of characters in a zone's name
  * 
+ * params: int
+ * zoneIndex - index of zone's pointer in climate.zones
+ * 
+ * return: int
+ * - number of characters up to null
  */
 int getStringLength(int zoneIndex) {
   int validityCode = isZoneValid(zoneIndex);
