@@ -7,50 +7,48 @@
  * 
  * params: none
  * 
- * return: none
+ * return: bool
+ * - returns true if login response was 200 and token was present
  */
 void login() {
   if (wifiMulti.run() == WL_CONNECTED) {
-    // attempt to log in
-    while (!credentials.isAuthed) {
-      // compose login json string
-      char loginValues[72];
-      composeLoginMessage(loginValues);
+    // compose login json string
+    char loginValues[72];
+    composeLoginMessage(loginValues);
 
-      // send post request with formatted string
-      http.begin(SERVER_ADDRESS, HTTP_PORT, "/users/login");
-      http.addHeader("content-type", "application/json");
-      int statusCode = http.POST(loginValues);
-      Serial.print("HTTP response status: ");
-      Serial.println(statusCode);
-      String response = http.getString();
-      int resLength = response.length() + 1;
-      http.end();
+    // send post request with formatted string
+    http.begin(SERVER_ADDRESS, HTTP_PORT, "/users/login");
+    http.addHeader("content-type", "application/json");
+    int statusCode = http.POST(loginValues);
+    Serial.print("HTTP response status: ");
+    Serial.println(statusCode);
+    String response = http.getString();
+    int resLength = response.length() + 1;
+    http.end();
 
-      // on success
-      if (statusCode == 200) {
-        // store JWT and toggle authed
-        char res[resLength];
-        response.toCharArray(res, resLength);
-        StaticJsonBuffer<200> jsonBuffer;
-        JsonObject& root = jsonBuffer.parseObject(res);
-        if (!root.success()) {
-          Serial.println("parseObject failed, retrying\n");
-          delay(5000);
-        } else {
-          strcpy(credentials.token, root["token"]);
-          credentials.isAuthed = 1;
-          Serial.print("Stored token");
-        }
-        Serial.print("Authed: ");
-        Serial.println(credentials.isAuthed);
+    // on success
+    if (statusCode == 200) {
+      // store JWT and toggle authed
+      char res[resLength];
+      response.toCharArray(res, resLength);
+      StaticJsonBuffer<200> jsonBuffer;
+      JsonObject& root = jsonBuffer.parseObject(res);
+      if (!root.success()) {
+        Serial.println("parseObject failed, retrying\n");
+        delay(500);
       } else {
-        // wait to retry login
-        Serial.println("Log in failed, retrying\n");
-        delay(5000);
+        strcpy(credentials.token, root["token"]);
+        credentials.isAuthed = 1;
+        Serial.print("Stored token");
+        connectUtil.isLoggedIn = true;
+        Serial.println("Login successful\n");
+        printConnectNotification('l');
       }
+    } else {
+      // wait to retry login
+      Serial.println("Log in failed\n");
+      delay(500);
     }
-    Serial.println("Login successful\n");
   }
 } // end login
 
@@ -114,7 +112,7 @@ void handleSensorPostRequest() {
   float _t, _h;
   char rapid[20];
   String data = server.arg("plain");
-  StaticJsonBuffer<200> jsonBuffer;
+  StaticJsonBuffer<300> jsonBuffer;
   JsonObject& root = jsonBuffer.parseObject(data);
   if (!root.success()) {
     Serial.println("DHT HTTP request parsing failed");
@@ -125,7 +123,7 @@ void handleSensorPostRequest() {
     deviceId = root["deviceId"];
     _t = root["temperature"];
     _h = root["humidity"];
-    strcpy(rapid, root["rapidTransmission"]);
+    strcpy(rapid, root["isRapid"]);
   }
   Serial.println("Remote DHT Sensor Update:");
   Serial.println("=========================");
@@ -138,22 +136,42 @@ void handleSensorPostRequest() {
   Serial.print("Rapid Transmission: ");
   Serial.println(rapid);
 
-  String activeZone = (climate.selectedZoneIndex == id) ? "active": "inactive";
+  String responseMessage = (climate.setZone == id) ? "active": "inactive";
   Serial.print("Set rapid transmission to ");
-  if (activeZone == "active") Serial.println(activeZone);
+  if (responseMessage == "active") Serial.println(responseMessage);
   else Serial.println("inactive");
   Serial.println("=========================\n");
 
-  // if id is default - add zone to system
-  if (id == -1) {
-    id = addZone(false, deviceId);
-  }
+  int index = getIndexByDevice(deviceId);
+  
+  /*
+   * possible combinations
+   * 
+   * sensor has not been registered before and has no index (new sensor or both sensor and thermostat restarted)
+   * id == -1 and index == -1
+   * 
+   * sensor has been registered before and has no index (thermostat restarted)
+   * id > -1 and index == -1
+   * 
+   * sensor has not been registered and but has an index (sensor restarted)
+   * id == -1 and index > -1
+   * 
+   * sensor has been registered and has an index (normal operation after init)
+   * id > -1 and index > -1
+   * 
+   */
+  if (id == -1 || index == -1) {
+    id = (index == -1) ? addZone(deviceId): index;
+    responseMessage += ":";
+    responseMessage += String(id);
+  } 
 
-  int updated = updateZone(id, _t, _h);
+  int updated = updateZone(id, _t, _h, climate.setZone == id);
   if (updated == 1) {
-    server.send(200, "text/plain", activeZone);
+    server.send(200, "text/plain", responseMessage);
+    queryEmitStatus(id);
   } else {
-    server.send(200, "text/plain", "readfail");
+    server.send(400);
   }
 } // end handleSensorPostRequest
 
@@ -170,11 +188,21 @@ void confirmRapidPostRequest() {
   JsonObject& root = jsonBuffer.parseObject(data);
   if (!root.success()) {
     Serial.println("DHT HTTP request parsing failed");
-    server.send(400);
     return;
   } else {
-    if (root["id"] == climate.selectedZoneIndex) {
+    char isRapid[20];
+    int id = root["id"];
+    strcpy(isRapid, root["isRapid"]);
+    Serial.print("Remote sensor ");
+    Serial.print(id);
+    Serial.print(" set to ");
+    Serial.println(!strcmp(isRapid, "true") ? "RAPID": "LONG");
+    if (!strcmp(isRapid, "false")) {
+      Serial.println("Confirmed remote sensor set to long transmission");
+    }
+    if (!strcmp(isRapid, "true") && id == climate.setZone) {
       climate.isRapidSet = true;
+      Serial.println("Confirmed remote sensor set to rapid tranmission");
     }
   }
 }
